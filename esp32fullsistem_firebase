@@ -1,0 +1,166 @@
+#include <WiFi.h>
+#include <Firebase_ESP_Client.h>
+#include "addons/TokenHelper.h"
+#include "addons/RTDBHelper.h"
+#include <ESP32Servo.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <HTTPClient.h>
+
+// ----------------- Servo -----------------
+Servo myservo;
+#define SERVO_PIN 19
+#define SERVO_PIN_2 21
+
+String jenisTerakhir = "";
+
+// ----------------- LCD I2C -----------------
+LiquidCrystal_I2C lcd(0x27, 16, 2);  
+// alamat I2C biasanya 0x27 atau 0x3F. 
+// Jika tidak tampil, coba ganti ke 0x3F
+
+// ----------------- WiFi & Firebase -----------------
+#define WIFI_SSID     "arzula"
+#define WIFI_PASSWORD "12345678"
+#define API_KEY       "AIzaSyCmXn0Mt6d0I07q7lf2agk0zmASptR5aIY"
+#define DATABASE_URL  "https://tongsampah-fb84c-default-rtdb.firebaseio.com/"
+
+FirebaseData fbdo;
+FirebaseAuth auth;
+
+FirebaseConfig config;
+bool signupOK = false;
+
+// ----------------- Ultrasonic -----------------
+#define TRIG1 5
+#define ECHO1 18
+#define TRIG2 17
+#define ECHO2 16
+#define TRIG3 33
+#define ECHO3 32
+
+// ----------------- Firebase Upload -----------------
+void firebaseSetInt(const String& path, int value) {
+  if (Firebase.RTDB.setInt(&fbdo, path, value)) {
+    Serial.printf("OK    → %s : %d\n", path.c_str(), value);
+  } else {
+    Serial.printf("GAGAL → %s : %s\n", path.c_str(), fbdo.errorReason().c_str());
+  }
+}
+
+// ----------------- Jarak -----------------
+int bacaJarak(int trigPin, int echoPin) {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  long durasi = pulseIn(echoPin, HIGH, 30000);
+  int jarak = durasi * 0.034 / 2;
+  return jarak;
+}
+
+// ----------------- Setup -----------------
+void setup() {
+  Serial.begin(115200);
+
+  // LCD
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print("Smart Trash Bin");
+  lcd.setCursor(0, 1);
+  lcd.print("Menghubungkan...");
+  
+  pinMode(TRIG1, OUTPUT); pinMode(ECHO1, INPUT);
+  pinMode(TRIG2, OUTPUT); pinMode(ECHO2, INPUT);
+  pinMode(TRIG3, OUTPUT); pinMode(ECHO3, INPUT);
+
+  myservo.attach(SERVO_PIN);
+  myservo.write(90);
+
+  // WiFi
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print("Menghubungkan ke WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(500);
+  }
+  Serial.printf("\nTerhubung - IP: %s\n", WiFi.localIP().toString().c_str());
+  
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("WiFi Terhubung");
+  lcd.setCursor(0, 1);
+  lcd.print(WiFi.localIP());
+
+  // Firebase
+  config.api_key = API_KEY;
+  config.database_url = DATABASE_URL;
+  config.token_status_callback = tokenStatusCallback;
+
+  if (Firebase.signUp(&config, &auth, "", "")) {
+    Serial.println("Sign-in anonim berhasil");
+    signupOK = true;
+  } else {
+    Serial.printf("Sign-in gagal: %s\n", config.signer.signupError.message.c_str());
+  }
+
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectWiFi(true);
+}
+
+void gerakServo(String jenis) {
+  if (jenis == "organik") {
+    myservo.write(0);
+  } else if (jenis == "anorganik") {
+    myservo.write(90);
+  } else if (jenis == "b3") {
+    myservo.write(180);
+  } else {
+    Serial.println("Jenis sampah tidak dikenal!");
+  }
+}
+
+// ----------------- Loop -----------------
+void loop() {
+  if (signupOK) {
+    int jarak1 = bacaJarak(TRIG1, ECHO1);
+    int jarak2 = bacaJarak(TRIG2, ECHO2);
+    int jarak3 = bacaJarak(TRIG3, ECHO3);
+
+    Serial.printf("Jarak Organik   : %d cm\n", jarak1);
+    Serial.printf("Jarak Anorganik : %d cm\n", jarak2);
+    Serial.printf("Jarak B3        : %d cm\n", jarak3);
+
+    firebaseSetInt("/Tongsampah1/organik", jarak1);
+    firebaseSetInt("/Tongsampah1/anorganik", jarak2);
+    firebaseSetInt("/Tongsampah1/B3", jarak3);
+
+    delay(2000);
+  }
+
+  if (Firebase.RTDB.getString(&fbdo, "/deteksi_sampah/label")) {
+    String jenis = fbdo.stringData();
+
+    if (jenis != jenisTerakhir) {
+      Serial.printf("Deteksi baru: %s\n", jenis.c_str());
+      gerakServo(jenis);
+
+      // tampilkan di LCD
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Jenis Sampah:");
+      lcd.setCursor(0, 1);
+      lcd.print(jenis);
+
+      delay(2000);
+      myservo.write(90);
+      jenisTerakhir = jenis;
+    }
+  } else {
+    Serial.printf("Gagal ambil data: %s\n", fbdo.errorReason().c_str());
+  }
+  delay(1000);
+}
